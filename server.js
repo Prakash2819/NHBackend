@@ -17,6 +17,7 @@ const doctorProfileRoutes  = require('./routes/doctor');
 const patientProfileRoutes = require('./routes/patientRoutes');
 const appointmentRoutes    = require('./routes/appointmentRoutes');
 const adminRoutes          = require('./routes/adminRoutes');
+const prescriptionRoutes   = require('./routes/prescriptionRoutes');
 
 // ── App + Middleware ──────────────────────────────────────────────────────────
 const app = express();
@@ -32,6 +33,7 @@ app.use('/api/doctors',      doctorProfileRoutes);
 app.use('/api/patient',      patientProfileRoutes);
 app.use('/api/appointments', appointmentRoutes);
 app.use('/api/admin',        adminRoutes);
+app.use('/api/prescriptions', prescriptionRoutes);
 
 // ── HTTP + Socket.io server ───────────────────────────────────────────────────
 const server = http.createServer(app);
