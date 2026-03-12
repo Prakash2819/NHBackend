@@ -397,6 +397,57 @@ router.get('/doctor/:doctorId/stats', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── GET /api/appointments/doctor/:doctorId/patients/full ──────────────────────
+// All patients (no limit) with allergies, conditions, email for MyPatients page
+router.get('/doctor/:doctorId/patients/full', async (req, res) => {
+  try {
+    const { Types } = require('mongoose');
+    let oid;
+    try { oid = new Types.ObjectId(req.params.doctorId); }
+    catch { return res.status(400).json({ error: 'Invalid doctorId' }); }
+
+    const appts = await Appointment.find({ doctorId: oid })
+      .sort({ date: -1 })
+      .select('patientId patientName date status');
+
+    // Dedupe — count visits per patient
+    const seen = new Map();
+    appts.forEach(a => {
+      const key = String(a.patientId);
+      if (!seen.has(key)) {
+        seen.set(key, { patientId: a.patientId, patientName: a.patientName, lastVisit: a.date, visits: 0 });
+      }
+      seen.get(key).visits++;
+    });
+
+    const patientIds = [...seen.keys()];
+    const patients = await Patient.find({ _id: { $in: patientIds } })
+      .select('name email phone gender dob bloodGroup conditions allergies photo');
+
+    const result = patients.map(p => {
+      const info = seen.get(String(p._id)) || {};
+      const age = p.dob ? Math.floor((Date.now() - new Date(p.dob)) / 31557600000) : null;
+      return {
+        patientId:  p._id,
+        name:       p.name  || info.patientName || '',
+        email:      p.email || '',
+        phone:      p.phone || '',
+        gender:     p.gender || '',
+        age,
+        bloodGroup: p.bloodGroup || '',
+        conditions: p.conditions || [],
+        allergies:  p.allergies  || [],
+        photo:      p.photo      || null,
+        lastVisit:  info.lastVisit  || null,
+        visits:     info.visits     || 0,
+      };
+    });
+
+    result.sort((a,b) => (b.lastVisit||'').localeCompare(a.lastVisit||''));
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── GET /api/appointments/doctor/:doctorId/patients ───────────────────────────
 // Unique patients who had appointments with this doctor (for recent patients panel)
 router.get('/doctor/:doctorId/patients', async (req, res) => {
@@ -451,55 +502,5 @@ router.get('/doctor/:doctorId/patients', async (req, res) => {
 });
 
 
-// ── GET /api/appointments/doctor/:doctorId/patients/full ──────────────────────
-// All patients (no limit) with allergies, conditions, email for MyPatients page
-router.get('/doctor/:doctorId/patients/full', async (req, res) => {
-  try {
-    const { Types } = require('mongoose');
-    let oid;
-    try { oid = new Types.ObjectId(req.params.doctorId); }
-    catch { return res.status(400).json({ error: 'Invalid doctorId' }); }
-
-    const appts = await Appointment.find({ doctorId: oid })
-      .sort({ date: -1 })
-      .select('patientId patientName date status');
-
-    // Dedupe — count visits per patient
-    const seen = new Map();
-    appts.forEach(a => {
-      const key = String(a.patientId);
-      if (!seen.has(key)) {
-        seen.set(key, { patientId: a.patientId, patientName: a.patientName, lastVisit: a.date, visits: 0 });
-      }
-      seen.get(key).visits++;
-    });
-
-    const patientIds = [...seen.keys()];
-    const patients = await Patient.find({ _id: { $in: patientIds } })
-      .select('name email phone gender dob bloodGroup conditions allergies photo');
-
-    const result = patients.map(p => {
-      const info = seen.get(String(p._id)) || {};
-      const age = p.dob ? Math.floor((Date.now() - new Date(p.dob)) / 31557600000) : null;
-      return {
-        patientId:  p._id,
-        name:       p.name  || info.patientName || '',
-        email:      p.email || '',
-        phone:      p.phone || '',
-        gender:     p.gender || '',
-        age,
-        bloodGroup: p.bloodGroup || '',
-        conditions: p.conditions || [],
-        allergies:  p.allergies  || [],
-        photo:      p.photo      || null,
-        lastVisit:  info.lastVisit  || null,
-        visits:     info.visits     || 0,
-      };
-    });
-
-    result.sort((a,b) => (b.lastVisit||'').localeCompare(a.lastVisit||''));
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
 
 module.exports = router;
