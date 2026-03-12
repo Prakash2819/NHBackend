@@ -90,8 +90,10 @@ router.get('/doctors', async (req, res) => {
 // ── PUT /api/admin/doctors/:id/status ─────────────────────────────────────────
 router.put('/doctors/:id/status', async (req, res) => {
   try {
-    const { status } = req.body;
-    const doc = await Doctor.findByIdAndUpdate(req.params.id, { status }, { new: true }).select('-password');
+    const { status, regVerified } = req.body;
+    const update = { status };
+    if (regVerified !== undefined) update.regVerified = regVerified;
+    const doc = await Doctor.findByIdAndUpdate(req.params.id, update, { new: true }).select('-password');
     if (!doc) return res.status(404).json({ error: 'Doctor not found' });
     res.json(doc);
   } catch (err) { res.status(500).json({ error: err.message }); }
