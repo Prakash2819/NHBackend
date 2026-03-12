@@ -43,5 +43,5 @@ const patientSchema = new mongoose.Schema({
   isOnboarded: { type: Boolean, default: false }, // true after popup is filled
 
 }, { timestamps: true });
-const Patient = mongoose.model("Patient", patientSchema);
+const Patient = mongoose.model("User", patientSchema);
 module.exports = Patient
