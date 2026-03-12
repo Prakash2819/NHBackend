@@ -325,3 +325,124 @@ router.put('/:id/notes', async (req, res) => {
 });
 
 module.exports = router;
+
+
+// ── GET /api/appointments/doctor/:doctorId/stats ──────────────────────────────
+// Dashboard stats: today's appts, weekly counts, monthly count, earnings
+router.get('/doctor/:doctorId/stats', async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+    const today = new Date().toISOString().split('T')[0];
+
+    // This week Mon–Sun
+    const now = new Date();
+    const dayOfWeek = now.getDay(); // 0=Sun
+    const monday = new Date(now);
+    monday.setDate(now.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+    monday.setHours(0,0,0,0);
+
+    const weekDates = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      return d.toISOString().split('T')[0];
+    });
+
+    // This month
+    const monthStart = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-01`;
+
+    const [todayAppts, weekAppts, monthAppts, reviewData] = await Promise.all([
+      Appointment.find({ doctorId, date: today }).sort({ time: 1 }),
+      Appointment.find({ doctorId, date: { $in: weekDates } }),
+      Appointment.find({ doctorId, date: { $gte: monthStart }, status: { $in: ['completed','confirmed'] } }),
+      Appointment.find({ doctorId, status: 'completed', rating: { $ne: null, $exists: true } }).select('rating'),
+    ]);
+
+    // Weekly breakdown by day label
+    const dayLabels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    const weeklyStats = weekDates.map((date, i) => ({
+      day:   dayLabels[i],
+      count: weekAppts.filter(a => a.date === date).length,
+    }));
+
+    // Earnings from completed appointments
+    const todayEarnings  = todayAppts.filter(a=>a.status==='completed').reduce((s,a)=>s+(Number(a.doctorFee)||0),0);
+    const weekEarnings   = weekAppts.filter(a=>a.status==='completed').reduce((s,a)=>s+(Number(a.doctorFee)||0),0);
+    const monthEarnings  = monthAppts.filter(a=>a.status==='completed').reduce((s,a)=>s+(Number(a.doctorFee)||0),0);
+
+    // Rating
+    const avgRating = reviewData.length
+      ? Math.round(reviewData.reduce((s,a)=>s+a.rating,0) / reviewData.length * 10) / 10
+      : 0;
+
+    res.json({
+      today: {
+        appointments: todayAppts,
+        total:     todayAppts.length,
+        completed: todayAppts.filter(a=>a.status==='completed').length,
+        upcoming:  todayAppts.filter(a=>a.status==='pending'||a.status==='confirmed').length,
+        ongoing:   todayAppts.filter(a=>a.status==='confirmed').length,
+        earnings:  todayEarnings,
+      },
+      weekly: {
+        stats:    weeklyStats,
+        total:    weekAppts.length,
+        earnings: weekEarnings,
+      },
+      monthly: {
+        total:    monthAppts.length,
+        earnings: monthEarnings,
+      },
+      rating: { avg: avgRating, count: reviewData.length },
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET /api/appointments/doctor/:doctorId/patients ───────────────────────────
+// Unique patients who had appointments with this doctor (for recent patients panel)
+router.get('/doctor/:doctorId/patients', async (req, res) => {
+  try {
+    const appts = await Appointment.find({ doctorId: req.params.doctorId })
+      .sort({ date: -1 })
+      .select('patientId patientName date status');
+
+    // Dedupe by patientId, keep most recent visit
+    const seen = new Map();
+    appts.forEach(a => {
+      if (!seen.has(String(a.patientId))) {
+        seen.set(String(a.patientId), {
+          patientId:   a.patientId,
+          patientName: a.patientName,
+          lastVisit:   a.date,
+          visits:      appts.filter(x => String(x.patientId) === String(a.patientId)).length,
+        });
+      }
+    });
+
+    // Enrich with Patient profile data
+    const Patient = require('../models/Patient');
+    const patientIds = [...seen.keys()];
+    const patients = await Patient.find({ _id: { $in: patientIds } })
+      .select('name phone gender dob bloodGroup conditions photo');
+
+    const result = patients.map(p => {
+      const apptInfo = seen.get(String(p._id)) || {};
+      const age = p.dob ? Math.floor((Date.now() - new Date(p.dob)) / 31557600000) : null;
+      return {
+        patientId:   p._id,
+        name:        p.name || apptInfo.patientName,
+        phone:       p.phone,
+        gender:      p.gender,
+        age,
+        bloodGroup:  p.bloodGroup,
+        condition:   p.conditions?.[0] || '',
+        photo:       p.photo,
+        lastVisit:   apptInfo.lastVisit,
+        visits:      apptInfo.visits,
+      };
+    });
+
+    // Sort by lastVisit desc
+    result.sort((a,b) => (b.lastVisit||'').localeCompare(a.lastVisit||''));
+    res.json(result.slice(0, 10));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
