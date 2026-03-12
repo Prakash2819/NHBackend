@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 dns.setServers(['8.8.8.8', '8.8.4.4']);
@@ -21,9 +23,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api',              patientRoutes);
@@ -74,6 +73,11 @@ io.on('connection', (socket) => {
   // Relay mute/video toggle state
   socket.on('media-state', ({ roomId, audio, video }) => {
     socket.to(roomId).emit('peer-media-state', { audio, video });
+  });
+
+  // Chat message — broadcast to everyone else in the room
+  socket.on('chat-message', ({ roomId, sender, text, time }) => {
+    socket.to(roomId).emit('chat-message', { sender, text, time });
   });
 
   // Leave / hangup
