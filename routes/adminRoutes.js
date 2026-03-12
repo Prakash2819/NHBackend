@@ -7,7 +7,7 @@ const Appointment = require('../models/Appointment');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 // Set ADMIN_PASSWORD in your .env file. Default is only for dev.
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin@healthapp123';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin@123';
 const TOKEN_SECRET   = process.env.ADMIN_TOKEN_SECRET || 'healthapp_admin_secret_key_2024';
 const TOKEN_TTL_MS   = 8 * 60 * 60 * 1000; // 8 hours
 
