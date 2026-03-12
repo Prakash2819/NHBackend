@@ -324,9 +324,6 @@ router.put('/:id/notes', async (req, res) => {
   }
 });
 
-module.exports = router;
-
-
 // ── GET /api/appointments/doctor/:doctorId/stats ──────────────────────────────
 // Dashboard stats: today's appts, weekly counts, monthly count, earnings
 router.get('/doctor/:doctorId/stats', async (req, res) => {
@@ -452,3 +449,5 @@ router.get('/doctor/:doctorId/patients', async (req, res) => {
     res.json(result.slice(0, 10));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+module.exports = router;
