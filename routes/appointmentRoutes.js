@@ -331,7 +331,10 @@ module.exports = router;
 // Dashboard stats: today's appts, weekly counts, monthly count, earnings
 router.get('/doctor/:doctorId/stats', async (req, res) => {
   try {
-    const { doctorId } = req.params;
+    const { Types } = require('mongoose');
+    let doctorId;
+    try { doctorId = new Types.ObjectId(req.params.doctorId); }
+    catch { return res.status(400).json({ error: 'Invalid doctorId' }); }
     const today = new Date().toISOString().split('T')[0];
 
     // This week Mon–Sun
@@ -401,7 +404,11 @@ router.get('/doctor/:doctorId/stats', async (req, res) => {
 // Unique patients who had appointments with this doctor (for recent patients panel)
 router.get('/doctor/:doctorId/patients', async (req, res) => {
   try {
-    const appts = await Appointment.find({ doctorId: req.params.doctorId })
+    const { Types } = require('mongoose');
+    let oid;
+    try { oid = new Types.ObjectId(req.params.doctorId); }
+    catch { return res.status(400).json({ error: 'Invalid doctorId' }); }
+    const appts = await Appointment.find({ doctorId: oid })
       .sort({ date: -1 })
       .select('patientId patientName date status');
 
@@ -419,7 +426,6 @@ router.get('/doctor/:doctorId/patients', async (req, res) => {
     });
 
     // Enrich with Patient profile data
-    const Patient = require('../models/Patient');
     const patientIds = [...seen.keys()];
     const patients = await Patient.find({ _id: { $in: patientIds } })
       .select('name phone gender dob bloodGroup conditions photo');
