@@ -38,6 +38,7 @@ const doctorSchema = new mongoose.Schema({
   experience:     { type: String, default: '' },
   degree:         { type: String, default: '' },
   registrationNo: { type: String, default: '' },
+  regVerified:    { type: Boolean, default: false },
   hospital:       { type: String, default: '' },
   department:     { type: String, default: '' },
   languages:      [{ type: String }],
