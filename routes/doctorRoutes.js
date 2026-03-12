@@ -8,14 +8,17 @@ const router = express.Router();
 // ================= DOCTOR SIGNUP =================
 router.post("/doctor-signup", async (req, res) => {
   try {
-    const { name, email, password, specialization } = req.body;
+    const { name, email, password, specialization, registrationNo } = req.body;
 
     if (!name || !email || !password || !specialization) {
       return res.status(400).json({ message: "All fields required" });
     }
 
-    const existingDoctor = await Doctor.findOne({ email });
+    if (!registrationNo || !registrationNo.trim()) {
+      return res.status(400).json({ message: "Medical registration number is required" });
+    }
 
+    const existingDoctor = await Doctor.findOne({ email });
     if (existingDoctor) {
       return res.status(400).json({ message: "Account already exists" });
     }
@@ -27,6 +30,7 @@ router.post("/doctor-signup", async (req, res) => {
       email,
       password: hashedPassword,
       specialization,
+      registrationNo: registrationNo.trim(),
     });
 
     res.json({
@@ -65,20 +69,20 @@ router.post("/doctor-login", async (req, res) => {
     }
 
     const isMatch = await bcrypt.compare(password, doctor.password);
-
     if (!isMatch) {
       return res.status(400).json({ message: "Invalid password" });
     }
 
     res.json({
-      message: 'Login successful',
+      message: "Login successful",
       doctor: {
-        _id:            doctor._id,   
-        name:           doctor.name,   
+        _id:            doctor._id,
+        name:           doctor.name,
         email:          doctor.email,
         role:           doctor.role,
         status:         doctor.status,
         specialization: doctor.specialization,
+        registrationNo: doctor.registrationNo || "",
       }
     });
 
