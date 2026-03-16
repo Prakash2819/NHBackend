@@ -12,7 +12,7 @@ function formatPhone(phone) {
   return null;
 }
 
-async function sendStatusSMS({ to, patientName, doctorName, specialty, date, time, type, status }) {
+async function sendStatusSMS({ to, patientName, doctorName, specialty, date, time, type, status, delayMinutes = 0, newEstimatedTime = '', reason = '' }) {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE) {
     console.warn('[SMS] Twilio env vars missing — skipped');
     return;
@@ -29,6 +29,13 @@ async function sendStatusSMS({ to, patientName, doctorName, specialty, date, tim
     body = `Hi ${patientName}, your appointment with Dr. ${doctorName} (${specialty}) has been CONFIRMED.\n\nDate: ${dateStr}\nTime: ${time}\nType: ${typeStr}\n\nPlease arrive on time.\n- Namma Hospitals`;
   } else if (status === 'cancelled') {
     body = `Hi ${patientName}, we're sorry — your appointment with Dr. ${doctorName} on ${dateStr} at ${time} has been CANCELLED by the doctor.\n\nPlease log in to Namma Hospitals to book a new appointment.\n- Namma Hospitals`;
+  } else if (status === 'delayed') {
+    const delayText = delayMinutes >= 60
+      ? `${Math.floor(delayMinutes/60)}hr ${delayMinutes%60 > 0 ? delayMinutes%60+'min' : ''}`.trim()
+      : `${delayMinutes} minutes`;
+    body = `Hi ${patientName}, Dr. ${doctorName} is running late by ${delayText}.\n\nYour appointment on ${dateStr}:\nOriginal time: ${time}\nNew estimated time: ${newEstimatedTime}\nReason: ${reason}\n\nSorry for the inconvenience.\n- Namma Hospitals`;
+  } else if (status === 'ready-early') {
+    body = `Hi ${patientName}, good news! Dr. ${doctorName} is ready for you earlier than expected.\n\nPlease come in as soon as possible for your ${dateStr} appointment.\n- Namma Hospitals`;
   }
 
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -700,5 +707,214 @@ router.get('/doctor/:doctorId/patients', async (req, res) => {
 });
 
 
+
+
+// ── Helper: add minutes to a 12h time string ──────────────────────────────────
+function addMinutesToTime(timeStr, mins) {
+  if (!timeStr) return timeStr;
+  const m = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return timeStr;
+  let [, h, min, mer] = m; h = +h; min = +min;
+  if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
+  if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
+  let total = h * 60 + min + mins;
+  let nh = Math.floor(total / 60) % 24, nm = total % 60;
+  const nmer = nh >= 12 ? 'PM' : 'AM';
+  if (nh > 12) nh -= 12;
+  if (nh === 0) nh = 12;
+  return `${String(nh).padStart(2,'0')}:${String(nm).padStart(2,'0')} ${nmer}`;
+}
+
+// ── POST /api/appointments/doctor/:doctorId/delay ─────────────────────────────
+// Doctor marks running late — shifts all upcoming confirmed appts + SMS patients
+// Body: { delayMinutes, reason }
+router.post('/doctor/:doctorId/delay', async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+    const { delayMinutes, reason = 'Doctor is running late' } = req.body;
+
+    if (!delayMinutes || delayMinutes < 1) {
+      return res.status(400).json({ error: 'delayMinutes must be at least 1' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+
+    // Find all upcoming confirmed/pending appointments for today after current time
+    const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+
+    const upcomingAppts = await Appointment.find({
+      doctorId,
+      date:   today,
+      status: { $in: ['confirmed', 'pending'] },
+    });
+
+    // Filter to only appointments that haven't started yet
+    const toNotify = upcomingAppts.filter(a => {
+      const m = a.time?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!m) return false;
+      let [, h, min, mer] = m; h = +h; min = +min;
+      if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
+      if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
+      return (h * 60 + min) > nowMin;
+    }).sort((a, b) => a.time > b.time ? 1 : -1);
+
+    if (toNotify.length === 0) {
+      return res.json({ notified: 0, message: 'No upcoming appointments to notify' });
+    }
+
+    // Update each appointment — shift estimated time + mark running late
+    const smsPromises = [];
+    for (const appt of toNotify) {
+      const newEstimated = addMinutesToTime(appt.time, (appt.delayMinutes || 0) + delayMinutes);
+      await Appointment.findByIdAndUpdate(appt._id, {
+        $inc: { delayMinutes: delayMinutes },
+        $set: {
+          isRunningLate:   true,
+          delayReason:     reason,
+          delayNotifiedAt: new Date(),
+        },
+      });
+
+      // SMS each affected patient
+      if (appt.patientPhone) {
+        const [y, mo, d] = appt.date.split('-').map(Number);
+        const dateStr = new Date(y, mo-1, d).toLocaleDateString('en-IN', { day:'numeric', month:'short' });
+        smsPromises.push(
+          sendStatusSMS({
+            to:          appt.patientPhone,
+            patientName: appt.patientName  || 'Patient',
+            doctorName:  appt.doctorName   || 'Doctor',
+            specialty:   appt.doctorSpecialty || '',
+            date:        appt.date,
+            time:        appt.time,
+            type:        appt.type,
+            status:      'delayed',
+            delayMinutes: (appt.delayMinutes || 0) + delayMinutes,
+            newEstimatedTime: newEstimated,
+            reason,
+          }).catch(err => console.error('[SMS delay] failed for', appt.patientName, err.message))
+        );
+      }
+    }
+
+    await Promise.allSettled(smsPromises);
+
+    res.json({
+      notified:   toNotify.length,
+      delayMinutes,
+      appointments: toNotify.map(a => ({
+        id:          a._id,
+        patientName: a.patientName,
+        originalTime:a.time,
+        newEstimated:addMinutesToTime(a.time, (a.delayMinutes || 0) + delayMinutes),
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/appointments/:id/complete-early ─────────────────────────────────
+// Doctor finishes a session early — marks complete + SMS next patient to come early
+router.post('/:id/complete-early', async (req, res) => {
+  try {
+    const appt = await Appointment.findByIdAndUpdate(
+      req.params.id,
+      { $set: { status: 'completed' } },
+      { new: true }
+    );
+    if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+
+    // Find the very next confirmed appointment for this doctor today
+    const today = new Date().toISOString().split('T')[0];
+    const allToday = await Appointment.find({
+      doctorId: appt.doctorId,
+      date:     today,
+      status:   { $in: ['confirmed', 'pending'] },
+    });
+
+    // Sort by time, pick the one right after current
+    const sorted = allToday.sort((a, b) => a.time > b.time ? 1 : -1);
+    const nextAppt = sorted[0]; // earliest remaining
+
+    if (nextAppt?.patientPhone) {
+      sendStatusSMS({
+        to:          nextAppt.patientPhone,
+        patientName: nextAppt.patientName  || 'Patient',
+        doctorName:  nextAppt.doctorName   || 'Doctor',
+        specialty:   nextAppt.doctorSpecialty || '',
+        date:        nextAppt.date,
+        time:        nextAppt.time,
+        type:        nextAppt.type,
+        status:      'ready-early',
+      }).catch(err => console.error('[SMS early] failed:', err.message));
+    }
+
+    res.json({ completed: appt, nextPatient: nextAppt || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/appointments/:id/delay-status ────────────────────────────────────
+// Patient polls this to check if their appointment is delayed
+router.get('/:id/delay-status', async (req, res) => {
+  try {
+    const appt = await Appointment.findById(req.params.id)
+      .select('delayMinutes delayReason isRunningLate time date status');
+    if (!appt) return res.status(404).json({ error: 'Not found' });
+    res.json({
+      isRunningLate:    appt.isRunningLate || false,
+      delayMinutes:     appt.delayMinutes  || 0,
+      delayReason:      appt.delayReason   || '',
+      originalTime:     appt.time,
+      estimatedTime:    addMinutesToTime(appt.time, appt.delayMinutes || 0),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Auto-detect delay: GET /api/appointments/doctor/:doctorId/check-overdue ───
+// Called by doctor portal on a timer — returns appointments that have passed
+// their scheduled time by > 10 mins and are still confirmed (not completed)
+router.get('/doctor/:doctorId/check-overdue', async (req, res) => {
+  try {
+    const today  = new Date().toISOString().split('T')[0];
+    const now    = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+
+    const appts = await Appointment.find({
+      doctorId: req.params.doctorId,
+      date:     today,
+      status:   'confirmed',
+    });
+
+    const overdue = appts.filter(a => {
+      const m = a.time?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!m) return false;
+      let [, h, min, mer] = m; h = +h; min = +min;
+      if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
+      if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
+      const apptMin = h * 60 + min;
+      return nowMin > apptMin + 10; // 10 min grace
+    });
+
+    res.json({ overdue: overdue.map(a => ({
+      id:          a._id,
+      patientName: a.patientName,
+      time:        a.time,
+      overdueBy:   (() => {
+        const m = a.time.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+        let [, h, min, mer] = m; h = +h; min = +min;
+        if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
+        if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
+        return nowMin - (h * 60 + min);
+      })(),
+    }))});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

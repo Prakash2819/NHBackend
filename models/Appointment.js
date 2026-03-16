@@ -1,4 +1,4 @@
-const {default:mongoose} = require('mongoose');
+const mongoose = require('mongoose');
 
 const appointmentSchema = new mongoose.Schema({
 
@@ -32,6 +32,12 @@ const appointmentSchema = new mongoose.Schema({
   rescheduledFrom: { type: mongoose.Schema.Types.ObjectId, ref: 'Appointment', default: null },
 
   notes: { type: String, default: '' }, // doctor can add notes after
+
+  // ── Delay tracking ──────────────────────────────────────────────────────
+  delayMinutes:   { type: Number, default: 0 },      // total delay added so far
+  delayReason:    { type: String, default: '' },      // e.g. 'Previous patient took longer'
+  delayNotifiedAt:{ type: Date,   default: null },    // last time patients were SMSed
+  isRunningLate:  { type: Boolean, default: false },  // flag shown in patient UI
 
   // Patient review after completed appointment
   rating: { type: Number, min: 1, max: 5, default: null },
