@@ -1,54 +1,47 @@
 const express  = require('express');
 const nodemailer = require('nodemailer');
-const twilio    = require('twilio');
+const twilio = require('twilio');
 
-// ── Twilio SMS helper ─────────────────────────────────────────────────────────
-let _twilioClient = null;
-function getTwilioClient() {
-  if (!_twilioClient) {
-    _twilioClient = twilio(
-      process.env.TWILIO_ACCOUNT_SID,
-      process.env.TWILIO_AUTH_TOKEN
-    );
-  }
-  return _twilioClient;
-}
-
+// ── SMS helper — fires only on doctor confirm ─────────────────────────────────
 function formatPhone(phone) {
-  // Normalize Indian numbers → E.164 (+91XXXXXXXXXX)
   if (!phone) return null;
   const digits = phone.replace(/\D/g, '');
   if (digits.length === 10) return `+91${digits}`;
   if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
-  if (digits.startsWith('+')) return phone.replace(/\s/g, '');
+  if (phone.startsWith('+')) return phone.replace(/\s/g, '');
   return null;
 }
 
-async function sendBookingSMS({ to, patientName, doctorName, specialty, date, time, type }) {
+async function sendStatusSMS({ to, patientName, doctorName, specialty, date, time, type, status }) {
   if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE) {
-    console.warn('[SMS] Twilio env vars not set — skipping');
+    console.warn('[SMS] Twilio env vars missing — skipped');
     return;
   }
-  const toFormatted = formatPhone(to);
-  if (!toFormatted) {
-    console.warn('[SMS] Invalid phone number:', to);
-    return;
-  }
-  const [y, mo, d] = date.split('-').map(Number);
-  const dateStr = new Date(y, mo - 1, d).toLocaleDateString('en-IN', {
-    day: 'numeric', month: 'short', year: 'numeric'
-  });
-  const typeLabel = type === 'video' ? 'Video' : 'In-person';
-  const body = `Hi ${patientName}, your appointment is confirmed!\n\nDr. ${doctorName} (${specialty})\nDate: ${dateStr}\nTime: ${time}\nType: ${typeLabel}\n\nNamma Hospitals`;
+  const toE164 = formatPhone(to);
+  if (!toE164) { console.warn('[SMS] bad phone:', to); return; }
 
-  const client = getTwilioClient();
+  const [y, mo, d] = date.split('-').map(Number);
+  const dateStr = new Date(y, mo - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  const typeStr = type === 'video' ? 'Video Call' : 'In-person Visit';
+
+  let body;
+  if (status === 'confirmed') {
+    body = `Hi ${patientName}, your appointment with Dr. ${doctorName} (${specialty}) has been CONFIRMED.\n\nDate: ${dateStr}\nTime: ${time}\nType: ${typeStr}\n\nPlease arrive on time.\n- Namma Hospitals`;
+  } else if (status === 'cancelled') {
+    body = `Hi ${patientName}, we're sorry — your appointment with Dr. ${doctorName} on ${dateStr} at ${time} has been CANCELLED by the doctor.\n\nPlease log in to Namma Hospitals to book a new appointment.\n- Namma Hospitals`;
+  }
+
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   const msg = await client.messages.create({
-    body,
     from: process.env.TWILIO_PHONE,
-    to:   toFormatted,
+    to:   toE164,
+    body,
   });
   return msg.sid;
 }
+
+
+
 
 
 // ── Email transporter (created once, reused) ──────────────────────────────────
@@ -217,26 +210,6 @@ router.post('/book', async (req, res) => {
     } else {
       console.log('[Email] skipped — patient has no email on file');
     }
-
-    // ── Send confirmation SMS ─────────────────────────────────────────────
-    const smsTo = patient.phone;
-    console.log('[SMS] patient.phone =', smsTo);
-    if (smsTo && smsTo.trim()) {
-      sendBookingSMS({
-        to:          smsTo.trim(),
-        patientName: patient.name  || 'Patient',
-        doctorName:  doctor.name   || 'Doctor',
-        specialty:   doctor.specialization || '',
-        date,
-        time,
-        type,
-      })
-        .then(sid => console.log('[SMS] ✅ sent, SID:', sid))
-        .catch(err => console.error('[SMS] ❌ failed:', err.message));
-    } else {
-      console.log('[SMS] skipped — patient has no phone on file');
-    }
-
     res.status(201).json(appt);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -282,6 +255,23 @@ router.put('/:id/status', async (req, res) => {
       { new: true }
     );
     if (!appt) return res.status(404).json({ error: 'Appointment not found' });
+
+    // ── SMS patient on confirm OR cancel ─────────────────────────────────
+    if (appt.patientPhone && (status === 'confirmed' || status === 'cancelled')) {
+      sendStatusSMS({
+        to:          appt.patientPhone,
+        patientName: appt.patientName     || 'Patient',
+        doctorName:  appt.doctorName      || 'Doctor',
+        specialty:   appt.doctorSpecialty || '',
+        date:        appt.date,
+        time:        appt.time,
+        type:        appt.type,
+        status,
+      })
+        .then(sid => console.log(`[SMS] ✅ ${status} SMS sent, SID:`, sid))
+        .catch(err => console.error('[SMS] ❌ failed:', err.message));
+    }
+
     res.json(appt);
   } catch (err) {
     res.status(400).json({ error: err.message });
