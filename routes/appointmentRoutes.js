@@ -1,5 +1,70 @@
 const express  = require('express');
 const nodemailer = require('nodemailer');
+const twilio    = require('twilio');
+
+// ── Twilio SMS helper ─────────────────────────────────────────────────────────
+let _twilioClient = null;
+function getTwilioClient() {
+  if (!_twilioClient) {
+    _twilioClient = twilio(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+  }
+  return _twilioClient;
+}
+
+function formatPhone(phone) {
+  // Normalize Indian numbers → E.164 (+91XXXXXXXXXX)
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
+  if (digits.startsWith('+')) return phone.replace(/\s/g, '');
+  return null;
+}
+
+async function sendBookingSMS({ to, patientName, doctorName, specialty, date, time, type }) {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE) {
+    console.warn('[SMS] Twilio env vars not set — skipping');
+    return;
+  }
+  const toFormatted = formatPhone(to);
+  if (!toFormatted) {
+    console.warn('[SMS] Invalid phone number:', to);
+    return;
+  }
+  const [y, mo, d] = date.split('-').map(Number);
+  const dateStr = new Date(y, mo - 1, d).toLocaleDateString('en-IN', {
+    day: 'numeric', month: 'short', year: 'numeric'
+  });
+  const typeLabel = type === 'video' ? 'Video' : 'In-person';
+  const body = `Hi ${patientName}, your appointment is confirmed!\n\nDr. ${doctorName} (${specialty})\nDate: ${dateStr}\nTime: ${time}\nType: ${typeLabel}\n\nNamma Hospitals`;
+
+  const client = getTwilioClient();
+  const msg = await client.messages.create({
+    body,
+    from: process.env.TWILIO_PHONE,
+    to:   toFormatted,
+  });
+  return msg.sid;
+}
+
+
+// ── Email transporter (created once, reused) ──────────────────────────────────
+let _transporter = null;
+function getTransporter() {
+  if (!_transporter) {
+    _transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+  }
+  return _transporter;
+}
 
 // ── Email helper ──────────────────────────────────────────────────────────────
 function formatDateReadable(dateStr) {
@@ -10,13 +75,11 @@ function formatDateReadable(dateStr) {
 }
 
 async function sendBookingEmail({ to, patientName, doctorName, specialty, hospital, date, time, type, fee }) {
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS, // Gmail App Password
-    },
-  });
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.warn('[Email] EMAIL_USER or EMAIL_PASS not set in environment — skipping');
+    return;
+  }
+  const transporter = getTransporter();
 
   const typeLabel = type === 'video' ? '🎥 Video Consultation' : '🏥 In-person Visit';
   const feeStr    = fee ? `₹${fee}` : 'As per clinic';
@@ -134,19 +197,44 @@ router.post('/book', async (req, res) => {
       reason: reason || '',
     });
 
-    // ── Send confirmation email (fire-and-forget) ──────────────────────────
-    if (patient.email) {
+    // ── Send confirmation email ───────────────────────────────────────────
+    const emailTo = patient.email;
+    console.log('[Email] patient.email =', emailTo);
+    if (emailTo && emailTo.trim()) {
       sendBookingEmail({
-        to:           patient.email,
-        patientName:  patient.name,
-        doctorName:   doctor.name,
-        specialty:    doctor.specialization,
+        to:           emailTo.trim(),
+        patientName:  patient.name  || 'Patient',
+        doctorName:   doctor.name   || 'Doctor',
+        specialty:    doctor.specialization || '',
         hospital:     doctor.hospital || '',
         date,
         time,
         type,
         fee:          doctor.clinic?.fee || '',
-      }).catch(err => console.error('[Email] failed:', err.message));
+      })
+        .then(() => console.log('[Email] ✅ confirmation sent to', emailTo))
+        .catch(err => console.error('[Email] ❌ failed:', err.message, '| code:', err.code));
+    } else {
+      console.log('[Email] skipped — patient has no email on file');
+    }
+
+    // ── Send confirmation SMS ─────────────────────────────────────────────
+    const smsTo = patient.phone;
+    console.log('[SMS] patient.phone =', smsTo);
+    if (smsTo && smsTo.trim()) {
+      sendBookingSMS({
+        to:          smsTo.trim(),
+        patientName: patient.name  || 'Patient',
+        doctorName:  doctor.name   || 'Doctor',
+        specialty:   doctor.specialization || '',
+        date,
+        time,
+        type,
+      })
+        .then(sid => console.log('[SMS] ✅ sent, SID:', sid))
+        .catch(err => console.error('[SMS] ❌ failed:', err.message));
+    } else {
+      console.log('[SMS] skipped — patient has no phone on file');
     }
 
     res.status(201).json(appt);
