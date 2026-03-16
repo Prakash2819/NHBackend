@@ -1,50 +1,60 @@
 const express  = require('express');
 const nodemailer = require('nodemailer');
-const twilio = require('twilio');
-
-// ── SMS helper — fires only on doctor confirm ─────────────────────────────────
-function formatPhone(phone) {
+// ── Fast2SMS helper (free, India only, no DLT needed for quick route) ───────────
+function getPhoneDigits(phone) {
   if (!phone) return null;
   const digits = phone.replace(/\D/g, '');
-  if (digits.length === 10) return `+91${digits}`;
-  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
-  if (phone.startsWith('+')) return phone.replace(/\s/g, '');
+  // Fast2SMS expects 10-digit Indian mobile number
+  if (digits.length === 10) return digits;
+  if (digits.length === 12 && digits.startsWith('91')) return digits.slice(2);
+  if (digits.length === 13 && digits.startsWith('91')) return digits.slice(3);
   return null;
 }
 
 async function sendStatusSMS({ to, patientName, doctorName, specialty, date, time, type, status, delayMinutes = 0, newEstimatedTime = '', reason = '' }) {
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_PHONE) {
-    console.warn('[SMS] Twilio env vars missing — skipped');
+  if (!process.env.FAST2SMS_API_KEY) {
+    console.warn('[SMS] FAST2SMS_API_KEY not set — skipped');
     return;
   }
-  const toE164 = formatPhone(to);
-  if (!toE164) { console.warn('[SMS] bad phone:', to); return; }
+  const phone = getPhoneDigits(to);
+  if (!phone) { console.warn('[SMS] bad phone:', to); return; }
 
   const [y, mo, d] = date.split('-').map(Number);
   const dateStr = new Date(y, mo - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
   const typeStr = type === 'video' ? 'Video Call' : 'In-person Visit';
 
-  let body;
+  let message;
   if (status === 'confirmed') {
-    body = `Hi ${patientName}, your appointment with Dr. ${doctorName} (${specialty}) has been CONFIRMED.\n\nDate: ${dateStr}\nTime: ${time}\nType: ${typeStr}\n\nPlease arrive on time.\n- Namma Hospitals`;
+    message = `Hi ${patientName}, your appointment with Dr. ${doctorName} (${specialty}) is CONFIRMED. Date: ${dateStr}, Time: ${time}, Type: ${typeStr}. Please arrive on time. - Namma Hospitals`;
   } else if (status === 'cancelled') {
-    body = `Hi ${patientName}, we're sorry — your appointment with Dr. ${doctorName} on ${dateStr} at ${time} has been CANCELLED by the doctor.\n\nPlease log in to Namma Hospitals to book a new appointment.\n- Namma Hospitals`;
+    message = `Hi ${patientName}, your appointment with Dr. ${doctorName} on ${dateStr} at ${time} has been CANCELLED. Please login to Namma Hospitals to rebook. - Namma Hospitals`;
   } else if (status === 'delayed') {
     const delayText = delayMinutes >= 60
-      ? `${Math.floor(delayMinutes/60)}hr ${delayMinutes%60 > 0 ? delayMinutes%60+'min' : ''}`.trim()
-      : `${delayMinutes} minutes`;
-    body = `Hi ${patientName}, Dr. ${doctorName} is running late by ${delayText}.\n\nYour appointment on ${dateStr}:\nOriginal time: ${time}\nNew estimated time: ${newEstimatedTime}\nReason: ${reason}\n\nSorry for the inconvenience.\n- Namma Hospitals`;
+      ? `${Math.floor(delayMinutes/60)}hr${delayMinutes%60>0?' '+delayMinutes%60+'min':''}`.trim()
+      : `${delayMinutes} min`;
+    message = `Hi ${patientName}, Dr. ${doctorName} is running ${delayText} late. Your ${dateStr} appointment: Original: ${time}, New estimated: ${newEstimatedTime}. Reason: ${reason}. Sorry for the delay. - Namma Hospitals`;
   } else if (status === 'ready-early') {
-    body = `Hi ${patientName}, good news! Dr. ${doctorName} is ready for you earlier than expected.\n\nPlease come in as soon as possible for your ${dateStr} appointment.\n- Namma Hospitals`;
+    message = `Hi ${patientName}, Dr. ${doctorName} is ready early! Please come in as soon as possible for your ${dateStr} appointment. - Namma Hospitals`;
+  } else {
+    return;
   }
 
-  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  const msg = await client.messages.create({
-    from: process.env.TWILIO_PHONE,
-    to:   toE164,
-    body,
+  // Fast2SMS Quick SMS API — no DLT registration needed
+  const axios = require('axios');
+  const res = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
+    route:    'q',          // quick route (no DLT needed)
+    message,
+    numbers:  phone,
+    flash:    '0',
+  }, {
+    headers: {
+      authorization: process.env.FAST2SMS_API_KEY,
+      'Content-Type': 'application/json',
+    },
   });
-  return msg.sid;
+
+  if (!res.data.return) throw new Error(res.data.message || 'Fast2SMS error');
+  return res.data.request_id;
 }
 
 
