@@ -25,35 +25,42 @@ async function sendStatusSMS({ to, patientName, doctorName, specialty, date, tim
 
   let message;
   if (status === 'confirmed') {
-    message = `Hi ${patientName}, your appointment with Dr. ${doctorName} (${specialty}) is CONFIRMED. Date: ${dateStr}, Time: ${time}, Type: ${typeStr}. Please arrive on time. - Namma Hospitals`;
+    message = `Appt confirmed with Dr ${doctorName} on ${dateStr} at ${time}. Type: ${typeStr}. - Namma Hospitals`;
   } else if (status === 'cancelled') {
-    message = `Hi ${patientName}, your appointment with Dr. ${doctorName} on ${dateStr} at ${time} has been CANCELLED. Please login to Namma Hospitals to rebook. - Namma Hospitals`;
+    message = `Your appt with Dr ${doctorName} on ${dateStr} at ${time} is CANCELLED. Login to rebook. - Namma Hospitals`;
   } else if (status === 'delayed') {
     const delayText = delayMinutes >= 60
       ? `${Math.floor(delayMinutes/60)}hr${delayMinutes%60>0?' '+delayMinutes%60+'min':''}`.trim()
-      : `${delayMinutes} min`;
-    message = `Hi ${patientName}, Dr. ${doctorName} is running ${delayText} late. Your ${dateStr} appointment: Original: ${time}, New estimated: ${newEstimatedTime}. Reason: ${reason}. Sorry for the delay. - Namma Hospitals`;
+      : `${delayMinutes}min`;
+    message = `Dr ${doctorName} is running ${delayText} late. New time: ${newEstimatedTime}. Sorry for delay. - Namma Hospitals`;
   } else if (status === 'ready-early') {
-    message = `Hi ${patientName}, Dr. ${doctorName} is ready early! Please come in as soon as possible for your ${dateStr} appointment. - Namma Hospitals`;
+    message = `Dr ${doctorName} is ready early. Please come in now for your ${dateStr} appt. - Namma Hospitals`;
   } else {
     return;
   }
 
-  // Fast2SMS Quick SMS API — no DLT registration needed
+  // Fast2SMS Quick SMS — POST with form data, auth key in header
   const axios = require('axios');
-  const res = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-    route:    'q',          // quick route (no DLT needed)
-    message,
-    numbers:  phone,
-    flash:    '0',
-  }, {
-    headers: {
-      authorization: process.env.FAST2SMS_API_KEY,
-      'Content-Type': 'application/json',
-    },
-  });
+  const res = await axios.post(
+    'https://www.fast2sms.com/dev/bulkV2',
+    new URLSearchParams({
+      route:    'q',
+      message,
+      language: 'english',
+      flash:    '0',
+      numbers:  phone,
+    }).toString(),
+    {
+      headers: {
+        authorization:  process.env.FAST2SMS_API_KEY,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'cache-control':'no-cache',
+      },
+    }
+  );
 
-  if (!res.data.return) throw new Error(res.data.message || 'Fast2SMS error');
+  console.log('[SMS] Fast2SMS response:', JSON.stringify(res.data));
+  if (!res.data.return) throw new Error(res.data.message || 'Fast2SMS rejected the request');
   return res.data.request_id;
 }
 
