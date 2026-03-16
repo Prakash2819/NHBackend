@@ -1,14 +1,107 @@
 const express  = require('express');
+const nodemailer = require('nodemailer');
+
+// ── Email helper ──────────────────────────────────────────────────────────────
+function formatDateReadable(dateStr) {
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  return new Date(y, mo - 1, d).toLocaleDateString('en-IN', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+  });
+}
+
+async function sendBookingEmail({ to, patientName, doctorName, specialty, hospital, date, time, type, fee }) {
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS, // Gmail App Password
+    },
+  });
+
+  const typeLabel = type === 'video' ? '🎥 Video Consultation' : '🏥 In-person Visit';
+  const feeStr    = fee ? `₹${fee}` : 'As per clinic';
+  const dateStr   = formatDateReadable(date);
+
+  await transporter.sendMail({
+    from:    `"Namma Hospitals" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `Appointment Confirmed — Dr. ${doctorName} on ${dateStr}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;background:#f9fafb;padding:0;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb">
+        <div style="background:linear-gradient(135deg,#1d4ed8,#2563eb);padding:28px 32px">
+          <h2 style="color:#fff;margin:0;font-size:20px">✅ Appointment Confirmed</h2>
+          <p style="color:#bfdbfe;margin:6px 0 0;font-size:14px">Namma Hospitals</p>
+        </div>
+        <div style="padding:28px 32px">
+          <p style="color:#374151;font-size:15px;margin:0 0 20px">Hi <strong>${patientName}</strong>, your appointment has been booked successfully.</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <tr style="border-bottom:1px solid #f3f4f6"><td style="padding:10px 0;color:#6b7280;width:130px">Doctor</td><td style="padding:10px 0;color:#111827;font-weight:600">Dr. ${doctorName}</td></tr>
+            <tr style="border-bottom:1px solid #f3f4f6"><td style="padding:10px 0;color:#6b7280">Specialty</td><td style="padding:10px 0;color:#111827">${specialty}</td></tr>
+            ${hospital ? `<tr style="border-bottom:1px solid #f3f4f6"><td style="padding:10px 0;color:#6b7280">Hospital</td><td style="padding:10px 0;color:#111827">${hospital}</td></tr>` : ''}
+            <tr style="border-bottom:1px solid #f3f4f6"><td style="padding:10px 0;color:#6b7280">Date</td><td style="padding:10px 0;color:#111827;font-weight:600">${dateStr}</td></tr>
+            <tr style="border-bottom:1px solid #f3f4f6"><td style="padding:10px 0;color:#6b7280">Time</td><td style="padding:10px 0;color:#1d4ed8;font-weight:700">${time}</td></tr>
+            <tr style="border-bottom:1px solid #f3f4f6"><td style="padding:10px 0;color:#6b7280">Type</td><td style="padding:10px 0;color:#111827">${typeLabel}</td></tr>
+            <tr><td style="padding:10px 0;color:#6b7280">Fee</td><td style="padding:10px 0;color:#111827">${feeStr}</td></tr>
+          </table>
+          <div style="margin-top:24px;padding:16px;background:#eff6ff;border-radius:8px;border-left:4px solid #2563eb">
+            <p style="margin:0;font-size:13px;color:#1d4ed8">
+              ${type === 'video'
+                ? '📱 <strong>Video call link</strong> will open in your Namma Hospitals app. Please join 5 minutes before your scheduled time.'
+                : '📍 Please arrive 10 minutes early at the clinic with a valid ID and any previous medical records.'}
+            </p>
+          </div>
+          <p style="margin:24px 0 0;font-size:13px;color:#9ca3af">Need to reschedule or cancel? Log in to your account at <a href="https://nhfrontend.netlify.app" style="color:#2563eb">nhfrontend.netlify.app</a></p>
+        </div>
+        <div style="background:#f3f4f6;padding:16px 32px;text-align:center">
+          <p style="margin:0;font-size:12px;color:#9ca3af">© Namma Hospitals — This is an automated confirmation email</p>
+        </div>
+      </div>
+    `,
+  });
+}
+
 const router   = express.Router();
 const Appointment = require('../models/Appointment');
 const Doctor   = require('../models/Doctor');
 const Patient  = require('../models/Patient');
+
+
+// ── GET /api/appointments/available-slots ─────────────────────────────────────
+// ?doctorId=&date=YYYY-MM-DD
+// Returns booked slot times for that doctor+date so frontend can grey them out
+router.get('/available-slots', async (req, res) => {
+  try {
+    const { doctorId, date } = req.query;
+    if (!doctorId || !date) return res.status(400).json({ error: 'doctorId and date required' });
+
+    const booked = await Appointment.find({
+      doctorId,
+      date,
+      status: { $in: ['pending', 'confirmed'] }, // only active bookings block slots
+    }).select('time');
+
+    res.json({ bookedSlots: booked.map(a => a.time) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── POST /api/appointments/book ───────────────────────────────────────────────
 // Called when patient clicks "Confirm Booking"
 router.post('/book', async (req, res) => {
   try {
     const { patientId, doctorId, date, time, type, reason } = req.body;
+
+    // ── Slot conflict check: is this slot already booked? ──────────────────
+    const slotTaken = await Appointment.findOne({
+      doctorId,
+      date,
+      time,
+      status: { $in: ['pending', 'confirmed'] },
+    });
+    if (slotTaken) {
+      return res.status(409).json({ error: 'This slot was just booked by someone else. Please choose another time.' });
+    }
 
     // Fetch doctor + patient for snapshot
     const [doctor, patient] = await Promise.all([
@@ -40,6 +133,21 @@ router.post('/book', async (req, res) => {
       type,
       reason: reason || '',
     });
+
+    // ── Send confirmation email (fire-and-forget) ──────────────────────────
+    if (patient.email) {
+      sendBookingEmail({
+        to:           patient.email,
+        patientName:  patient.name,
+        doctorName:   doctor.name,
+        specialty:    doctor.specialization,
+        hospital:     doctor.hospital || '',
+        date,
+        time,
+        type,
+        fee:          doctor.clinic?.fee || '',
+      }).catch(err => console.error('[Email] failed:', err.message));
+    }
 
     res.status(201).json(appt);
   } catch (err) {
@@ -167,6 +275,18 @@ router.post('/:id/reschedule', async (req, res) => {
 
     const { date, time, type } = req.body;
     if (!date || !time) return res.status(400).json({ error: 'date and time are required' });
+
+    // ── Conflict check: new slot must not already be taken ────────────────
+    const slotTaken = await Appointment.findOne({
+      doctorId: original.doctorId,
+      date,
+      time,
+      status: { $in: ['pending', 'confirmed'] },
+      _id: { $ne: original._id }, // exclude the original itself
+    });
+    if (slotTaken) {
+      return res.status(409).json({ error: 'That slot is already booked. Please choose a different time.' });
+    }
 
     // Mark original as missed if it was pending/confirmed
     if (['pending', 'confirmed'].includes(original.status)) {
