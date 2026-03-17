@@ -828,17 +828,17 @@ router.post('/doctor/:doctorId/delay', async (req, res) => {
     const upcomingAppts = await Appointment.find({
       doctorId,
       date:   today,
-      status: { $in: ['confirmed', 'pending'] },
+      status: { $in: ['confirmed', 'pending'] }, // include pending for in-person
     });
 
-    // Filter to only appointments that haven't started yet
+    // Filter to only appointments that haven't started yet (future time slots)
     const toNotify = upcomingAppts.filter(a => {
       const m = a.time?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
       if (!m) return false;
       let [, h, min, mer] = m; h = +h; min = +min;
       if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
       if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
-      return (h * 60 + min) > nowMin;
+      return (h * 60 + min) > nowMin; // only future appointments
     }).sort((a, b) => a.time > b.time ? 1 : -1);
 
     if (toNotify.length === 0) {
@@ -970,7 +970,7 @@ router.get('/doctor/:doctorId/check-overdue', async (req, res) => {
     const appts = await Appointment.find({
       doctorId: req.params.doctorId,
       date:     today,
-      status:   'confirmed',
+      status:   { $in: ['confirmed', 'pending'] }, // pending covers in-person not yet confirmed
     });
 
     const overdue = appts.filter(a => {
@@ -980,7 +980,9 @@ router.get('/doctor/:doctorId/check-overdue', async (req, res) => {
       if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
       if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
       const apptMin = h * 60 + min;
-      return nowMin > apptMin + 10; // 10 min grace
+      // Grace period: video 10 min, in-person 15 min (clinic arrival takes longer)
+      const grace = a.type === 'video' ? 10 : 15;
+      return nowMin > apptMin + grace;
     });
 
     res.json({ overdue: overdue.map(a => ({
@@ -1013,7 +1015,7 @@ router.post('/doctor/:doctorId/auto-delay', async (req, res) => {
     const now    = new Date();
     const nowMin = now.getHours() * 60 + now.getMinutes();
 
-    // Find confirmed appointment that is currently overdue (started but not completed)
+    // Find overdue appointment (confirmed OR pending — in-person stays pending)
     const allToday = await Appointment.find({
       doctorId,
       date:   today,
@@ -1028,7 +1030,8 @@ router.post('/doctor/:doctorId/auto-delay', async (req, res) => {
         let [, h, min, mer] = m; h = +h; min = +min;
         if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
         if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
-        return nowMin > (h * 60 + min) + 10; // 10 min grace
+        const grace = a.type === 'video' ? 10 : 15; // in-person gets 15 min grace
+        return nowMin > (h * 60 + min) + grace;
       })
       .sort((a, b) => a.time > b.time ? 1 : -1)
       .pop(); // most recent overdue one
