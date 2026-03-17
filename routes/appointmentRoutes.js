@@ -200,19 +200,33 @@ const Patient  = require('../models/Patient');
 
 // ── GET /api/appointments/available-slots ─────────────────────────────────────
 // ?doctorId=&date=YYYY-MM-DD
-// Returns booked slot times for that doctor+date so frontend can grey them out
+// Returns booked slot times + delay-blocked slots so frontend greys them out
 router.get('/available-slots', async (req, res) => {
   try {
     const { doctorId, date } = req.query;
     if (!doctorId || !date) return res.status(400).json({ error: 'doctorId and date required' });
 
-    const booked = await Appointment.find({
+    const appts = await Appointment.find({
       doctorId,
       date,
-      status: { $in: ['pending', 'confirmed'] }, // only active bookings block slots
-    }).select('time');
+      status: { $in: ['pending', 'confirmed'] },
+    }).select('time delayMinutes isRunningLate');
 
-    res.json({ bookedSlots: booked.map(a => a.time) });
+    const bookedSlots = appts.map(a => a.time);
+
+    // Build delay-blocked slots: if an appointment is delayed, also block
+    // the slots between original time and estimated end time
+    const delayedSlots = [];
+    for (const appt of appts) {
+      if (appt.isRunningLate && appt.delayMinutes > 0) {
+        delayedSlots.push(addMinutesToTime(appt.time, appt.delayMinutes));
+      }
+    }
+
+    res.json({
+      bookedSlots,
+      delayedSlots: [...new Set(delayedSlots)],
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
