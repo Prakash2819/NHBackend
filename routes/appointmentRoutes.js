@@ -1,23 +1,23 @@
 const express  = require('express');
 const nodemailer = require('nodemailer');
-// ── Fast2SMS helper (free, India only, no DLT needed for quick route) ───────────
-function getPhoneDigits(phone) {
+// ── TextBee helper (free, uses your Android phone as SMS gateway) ─────────────
+// Setup: textbee.dev → register → install app on Android → get API_KEY + DEVICE_ID
+function formatPhoneE164(phone) {
   if (!phone) return null;
   const digits = phone.replace(/\D/g, '');
-  // Fast2SMS expects 10-digit Indian mobile number
-  if (digits.length === 10) return digits;
-  if (digits.length === 12 && digits.startsWith('91')) return digits.slice(2);
-  if (digits.length === 13 && digits.startsWith('91')) return digits.slice(3);
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
+  if (phone.startsWith('+')) return phone.replace(/\s/g, '');
   return null;
 }
 
 async function sendStatusSMS({ to, patientName, doctorName, specialty, date, time, type, status, delayMinutes = 0, newEstimatedTime = '', reason = '' }) {
-  if (!process.env.FAST2SMS_API_KEY) {
-    console.warn('[SMS] FAST2SMS_API_KEY not set — skipped');
+  if (!process.env.TEXTBEE_API_KEY || !process.env.TEXTBEE_DEVICE_ID) {
+    console.warn('[SMS] TEXTBEE_API_KEY or TEXTBEE_DEVICE_ID not set — skipped');
     return;
   }
-  const phone = getPhoneDigits(to);
-  if (!phone) { console.warn('[SMS] bad phone:', to); return; }
+  const toE164 = formatPhoneE164(to);
+  if (!toE164) { console.warn('[SMS] bad phone:', to); return; }
 
   const [y, mo, d] = date.split('-').map(Number);
   const dateStr = new Date(y, mo - 1, d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -39,29 +39,23 @@ async function sendStatusSMS({ to, patientName, doctorName, specialty, date, tim
     return;
   }
 
-  // Fast2SMS Quick SMS — POST with form data, auth key in header
+  // TextBee API — POST to your Android device gateway
   const axios = require('axios');
   const res = await axios.post(
-    'https://www.fast2sms.com/dev/bulkV2',
-    new URLSearchParams({
-      route:    'q',
+    `https://api.textbee.dev/api/v1/gateway/devices/${process.env.TEXTBEE_DEVICE_ID}/send-sms`,
+    {
+      recipients: [toE164],
       message,
-      language: 'english',
-      flash:    '0',
-      numbers:  phone,
-    }).toString(),
+    },
     {
       headers: {
-        authorization:  process.env.FAST2SMS_API_KEY,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'cache-control':'no-cache',
+        'x-api-key':    process.env.TEXTBEE_API_KEY,
+        'Content-Type': 'application/json',
       },
     }
   );
-
-  console.log('[SMS] Fast2SMS response:', JSON.stringify(res.data));
-  if (!res.data.return) throw new Error(res.data.message || 'Fast2SMS rejected the request');
-  return res.data.request_id;
+  console.log('[SMS] TextBee response:', JSON.stringify(res.data));
+  return res.data?.data?._id || 'sent';
 }
 
 
