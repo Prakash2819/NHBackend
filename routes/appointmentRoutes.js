@@ -25,16 +25,74 @@ async function sendStatusSMS({ to, patientName, doctorName, specialty, date, tim
 
   let message;
   if (status === 'confirmed') {
-    message = `Appt confirmed with Dr ${doctorName} on ${dateStr} at ${time}. Type: ${typeStr}. - Namma Hospitals`;
+    message = [
+      `Dear ${patientName},`,
+      ``,
+      `Your appointment has been CONFIRMED.`,
+      ``,
+      `Doctor  : Dr. ${doctorName}`,
+      `Specialty: ${specialty}`,
+      `Date    : ${dateStr}`,
+      `Time    : ${time}`,
+      `Type    : ${typeStr}`,
+      ``,
+      type === 'video'
+        ? `Please open Namma Hospitals app 5 mins before your scheduled time to join the video call.`
+        : `Please arrive 10 minutes early at the clinic with a valid ID.`,
+      ``,
+      `Namma Hospitals`,
+    ].join('\n');
+
   } else if (status === 'cancelled') {
-    message = `Your appt with Dr ${doctorName} on ${dateStr} at ${time} is CANCELLED. Login to rebook. - Namma Hospitals`;
+    message = [
+      `Dear ${patientName},`,
+      ``,
+      `We regret to inform you that your appointment has been CANCELLED.`,
+      ``,
+      `Doctor : Dr. ${doctorName}`,
+      `Date   : ${dateStr}`,
+      `Time   : ${time}`,
+      ``,
+      `We apologize for the inconvenience. Please log in to Namma Hospitals to book a new appointment at your convenience.`,
+      ``,
+      `Namma Hospitals`,
+    ].join('\n');
+
   } else if (status === 'delayed') {
     const delayText = delayMinutes >= 60
-      ? `${Math.floor(delayMinutes/60)}hr${delayMinutes%60>0?' '+delayMinutes%60+'min':''}`.trim()
-      : `${delayMinutes}min`;
-    message = `Dr ${doctorName} is running ${delayText} late. New time: ${newEstimatedTime}. Sorry for delay. - Namma Hospitals`;
+      ? `${Math.floor(delayMinutes/60)} hour${Math.floor(delayMinutes/60)>1?'s':''}${delayMinutes%60>0?' '+delayMinutes%60+' min':''}`
+      : `${delayMinutes} minutes`;
+    message = [
+      `Dear ${patientName},`,
+      ``,
+      `Important update regarding your appointment with Dr. ${doctorName}.`,
+      ``,
+      `The doctor is currently running late by ${delayText}.`,
+      `Reason  : ${reason || 'Previous consultation took longer than expected'}`,
+      ``,
+      `Original Time  : ${time}`,
+      `New Est. Time  : ${newEstimatedTime}`,
+      `Date           : ${dateStr}`,
+      ``,
+      `We sincerely apologize for the delay and appreciate your patience.`,
+      ``,
+      `Namma Hospitals`,
+    ].join('\n');
+
   } else if (status === 'ready-early') {
-    message = `Dr ${doctorName} is ready early. Please come in now for your ${dateStr} appt. - Namma Hospitals`;
+    message = [
+      `Dear ${patientName},`,
+      ``,
+      `Great news! Dr. ${doctorName} is available earlier than scheduled.`,
+      ``,
+      `Date : ${dateStr}`,
+      `Time : ${time}`,
+      ``,
+      `If convenient, please arrive at the ${type === 'video' ? 'video call' : 'clinic'} as soon as possible.`,
+      ``,
+      `Namma Hospitals`,
+    ].join('\n');
+
   } else {
     return;
   }
@@ -923,6 +981,129 @@ router.get('/doctor/:doctorId/check-overdue', async (req, res) => {
         return nowMin - (h * 60 + min);
       })(),
     }))});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ── POST /api/appointments/doctor/:doctorId/auto-delay ────────────────────────
+// Called automatically by frontend when overdue detected.
+// Calculates exact overdue minutes, shifts upcoming slots, SMS all patients.
+// Only notifies appointments that haven't been notified in the last 30 mins
+// (prevents spam if the poll keeps firing).
+router.post('/doctor/:doctorId/auto-delay', async (req, res) => {
+  try {
+    const { doctorId } = req.params;
+    const today  = new Date().toISOString().split('T')[0];
+    const now    = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+
+    // Find confirmed appointment that is currently overdue (started but not completed)
+    const allToday = await Appointment.find({
+      doctorId,
+      date:   today,
+      status: { $in: ['confirmed', 'pending'] },
+    });
+
+    // Find the appointment that SHOULD be happening right now but is overdue
+    const overdueAppt = allToday
+      .filter(a => {
+        const m = a.time?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+        if (!m) return false;
+        let [, h, min, mer] = m; h = +h; min = +min;
+        if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
+        if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
+        return nowMin > (h * 60 + min) + 10; // 10 min grace
+      })
+      .sort((a, b) => a.time > b.time ? 1 : -1)
+      .pop(); // most recent overdue one
+
+    if (!overdueAppt) {
+      return res.json({ notified: 0, message: 'No overdue appointment found' });
+    }
+
+    // Calculate how many minutes overdue
+    const m = overdueAppt.time.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    let [, h, min, mer] = m; h = +h; min = +min;
+    if (mer.toUpperCase() === 'PM' && h !== 12) h += 12;
+    if (mer.toUpperCase() === 'AM' && h === 12) h = 0;
+    const overdueBy = nowMin - (h * 60 + min);
+
+    // Round up to nearest 5 mins for cleaner SMS
+    const delayMins = Math.ceil(overdueBy / 5) * 5;
+
+    // Find upcoming appointments AFTER the overdue one
+    const upcoming = allToday.filter(a => {
+      if (String(a._id) === String(overdueAppt._id)) return false;
+      const mx = a.time?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (!mx) return false;
+      let [, hx, mnx, merx] = mx; hx = +hx; mnx = +mnx;
+      if (merx.toUpperCase() === 'PM' && hx !== 12) hx += 12;
+      if (merx.toUpperCase() === 'AM' && hx === 12) hx = 0;
+      return (hx * 60 + mnx) > nowMin; // only future appointments
+    }).sort((a, b) => a.time > b.time ? 1 : -1);
+
+    if (upcoming.length === 0) {
+      return res.json({ notified: 0, message: 'No upcoming appointments to notify' });
+    }
+
+    const thirtyMinsAgo = new Date(Date.now() - 30 * 60 * 1000);
+    const smsPromises = [];
+    let notified = 0;
+
+    for (const appt of upcoming) {
+      // Skip if already notified within last 30 mins (prevent SMS spam)
+      if (appt.delayNotifiedAt && new Date(appt.delayNotifiedAt) > thirtyMinsAgo) {
+        console.log(`[AutoDelay] skipping ${appt.patientName} — notified recently`);
+        continue;
+      }
+
+      const totalDelay = (appt.delayMinutes || 0) + delayMins;
+      const newEstimated = addMinutesToTime(appt.time, totalDelay);
+
+      await Appointment.findByIdAndUpdate(appt._id, {
+        $inc: { delayMinutes: delayMins },
+        $set: {
+          isRunningLate:   true,
+          delayReason:     'Doctor is running behind schedule',
+          delayNotifiedAt: new Date(),
+        },
+      });
+
+      if (appt.patientPhone) {
+        smsPromises.push(
+          sendStatusSMS({
+            to:               appt.patientPhone,
+            patientName:      appt.patientName      || 'Patient',
+            doctorName:       appt.doctorName        || 'Doctor',
+            specialty:        appt.doctorSpecialty   || '',
+            date:             appt.date,
+            time:             appt.time,
+            type:             appt.type,
+            status:           'delayed',
+            delayMinutes:     totalDelay,
+            newEstimatedTime: newEstimated,
+            reason:           'Doctor is running behind schedule',
+          }).catch(err => console.error('[AutoDelay SMS] failed:', err.message))
+        );
+        notified++;
+      }
+    }
+
+    await Promise.allSettled(smsPromises);
+    console.log(`[AutoDelay] notified ${notified} patients of ${delayMins} min delay`);
+
+    res.json({
+      notified,
+      delayMins,
+      overdueAppt: overdueAppt.patientName,
+      upcoming: upcoming.map(a => ({
+        patientName:  a.patientName,
+        originalTime: a.time,
+        newEstimated: addMinutesToTime(a.time, (a.delayMinutes || 0) + delayMins),
+      })),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
